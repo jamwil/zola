@@ -240,6 +240,39 @@ fn rebuild_done_handling(broadcaster: &Sender, res: Result<()>, reload_path: &st
     }
 }
 
+fn construct_url(base_url: &str, no_port_append: bool, interface_port: u16) -> String {
+    if base_url == "/" {
+        return String::from("/");
+    }
+
+    let (protocol, stripped_url) = match base_url {
+        url if url.starts_with("http://") => ("http://", &url[7..]),
+        url if url.starts_with("https://") => ("https://", &url[8..]),
+        url => ("http://", url),
+    };
+
+    let (domain, path) = {
+        let parts: Vec<&str> = stripped_url.splitn(2, '/').collect();
+        if parts.len() > 1 {
+            (parts[0], format!("/{}", parts[1]))
+        } else {
+            (parts[0], String::new())
+        }
+    };
+
+    let full_address = if no_port_append {
+        format!("{}{}{}", protocol, domain, path)
+    } else {
+        format!("{}{}:{}{}", protocol, domain, interface_port, path)
+    };
+
+    if full_address.ends_with('/') {
+        full_address
+    } else {
+        format!("{}/", full_address)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_new_site(
     root_dir: &Path,
@@ -252,30 +285,15 @@ fn create_new_site(
     include_drafts: bool,
     no_port_append: bool,
     ws_port: Option<u16>,
-) -> Result<(Site, String)> {
+) -> Result<(Site, String, String)> {
     SITE_CONTENT.write().unwrap().clear();
 
     let mut site = Site::new(root_dir, config_file)?;
-    let address = format!("{}:{}", interface, interface_port);
-
-    let base_url = if base_url == "/" {
-        String::from("/")
-    } else {
-        let base_address = if no_port_append {
-            base_url.to_string()
-        } else {
-            format!("{}:{}", base_url, interface_port)
-        };
-
-        if site.config.base_url.ends_with('/') {
-            format!("http://{}/", base_address)
-        } else {
-            format!("http://{}", base_address)
-        }
-    };
+    let constructed_interface = format!("{}:{}", interface, interface_port);
+    let constructed_base_url = construct_url(base_url, no_port_append, interface_port);
 
     site.enable_serve_mode();
-    site.set_base_url(base_url);
+    site.set_base_url(constructed_base_url.clone());
     if let Some(output_dir) = output_dir {
         if !force && output_dir.exists() {
             return Err(Error::msg(format!(
@@ -297,7 +315,7 @@ fn create_new_site(
     messages::notify_site_size(&site);
     messages::warn_about_ignored_pages(&site);
     site.build()?;
-    Ok((site, address))
+    Ok((site, constructed_interface, constructed_base_url))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -316,7 +334,7 @@ pub fn serve(
     utc_offset: UtcOffset,
 ) -> Result<()> {
     let start = Instant::now();
-    let (mut site, address) = create_new_site(
+    let (mut site, constructed_interface, constructed_base_url) = create_new_site(
         root_dir,
         interface,
         interface_port,
@@ -331,12 +349,12 @@ pub fn serve(
     messages::report_elapsed_time(start);
 
     // Stop right there if we can't bind to the address
-    let bind_address: SocketAddrV4 = match address.parse() {
+    let bind_address: SocketAddrV4 = match constructed_interface.parse() {
         Ok(a) => a,
-        Err(_) => return Err(anyhow!("Invalid address: {}.", address)),
+        Err(_) => return Err(anyhow!("Invalid address: {}.", constructed_interface)),
     };
     if (TcpListener::bind(bind_address)).is_err() {
-        return Err(anyhow!("Cannot start server on address {}.", address));
+        return Err(anyhow!("Cannot start server on address {}.", constructed_interface));
     }
 
     let config_path = PathBuf::from(config_file);
@@ -388,7 +406,7 @@ pub fn serve(
     let static_root = output_path.clone();
     let broadcaster = {
         thread::spawn(move || {
-            let addr = address.parse().unwrap();
+            let addr = constructed_interface.parse().unwrap();
 
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -408,9 +426,12 @@ pub fn serve(
 
                 let server = Server::bind(&addr).serve(make_service);
 
-                println!("Web server is available at http://{}\n", &address);
+                println!(
+                    "Web server is available at {} (bound to {})\n",
+                    &constructed_base_url, &constructed_interface
+                );
                 if open {
-                    if let Err(err) = open::that(format!("http://{}", &address)) {
+                    if let Err(err) = open::that(format!("{}", &constructed_base_url)) {
                         eprintln!("Failed to open URL in your browser: {}", err);
                     }
                 }
@@ -537,7 +558,7 @@ pub fn serve(
         no_port_append,
         ws_port,
     ) {
-        Ok((s, _)) => {
+        Ok((s, _, _)) => {
             rebuild_done_handling(&broadcaster, Ok(()), "/x.js");
             Some(s)
         }
@@ -714,7 +735,7 @@ fn is_folder_empty(dir: &Path) -> bool {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{detect_change_kind, is_temp_file, ChangeKind};
+    use super::{construct_url, detect_change_kind, is_temp_file, ChangeKind};
 
     #[test]
     fn can_recognize_temp_files() {
@@ -805,5 +826,41 @@ mod tests {
         let path = Path::new("templates/hello.html");
         let config_filename = Path::new("config.toml");
         assert_eq!(expected, detect_change_kind(pwd, path, config_filename));
+    }
+
+    #[test]
+    fn test_construct_url_base_url_is_slash() {
+        let result = construct_url("/", false, 8080);
+        assert_eq!(result, "/");
+    }
+
+    #[test]
+    fn test_construct_url_http_protocol() {
+        let result = construct_url("http://example.com", false, 8080);
+        assert_eq!(result, "http://example.com:8080/");
+    }
+
+    #[test]
+    fn test_construct_url_https_protocol() {
+        let result = construct_url("https://example.com", false, 8080);
+        assert_eq!(result, "https://example.com:8080/");
+    }
+
+    #[test]
+    fn test_construct_url_no_protocol() {
+        let result = construct_url("example.com", false, 8080);
+        assert_eq!(result, "http://example.com:8080/");
+    }
+
+    #[test]
+    fn test_construct_url_no_port_append() {
+        let result = construct_url("https://example.com", true, 8080);
+        assert_eq!(result, "https://example.com/");
+    }
+
+    #[test]
+    fn test_construct_url_trailing_slash() {
+        let result = construct_url("http://example.com/", false, 8080);
+        assert_eq!(result, "http://example.com:8080/");
     }
 }
