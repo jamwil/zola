@@ -75,16 +75,34 @@ static NOT_FOUND_TEXT: &[u8] = b"Not Found";
 // This is dist/livereload.min.js from the LiveReload.js v3.2.4 release
 const LIVE_RELOAD: &str = include_str!("livereload.js");
 
-async fn handle_request(req: Request<Body>, mut root: PathBuf) -> Result<Response<Body>> {
+async fn handle_request(
+    req: Request<Body>,
+    mut root: PathBuf,
+    base_path: String,
+) -> Result<Response<Body>> {
+    let path_str = req.uri().path();
+    if !path_str.starts_with(&base_path) {
+        return Ok(not_found());
+    }
+
+    let trimmed_path = &path_str[base_path.len()..];
+
     let original_root = root.clone();
     let mut path = RelativePathBuf::new();
     // https://zola.discourse.group/t/percent-encoding-for-slugs/736
-    let decoded = match percent_encoding::percent_decode_str(req.uri().path()).decode_utf8() {
+    let decoded = match percent_encoding::percent_decode_str(trimmed_path).decode_utf8() {
         Ok(d) => d,
         Err(_) => return Ok(not_found()),
     };
 
-    for c in decoded.split('/') {
+    let decoded_path = if base_path != "/" && decoded.starts_with(&base_path) {
+        // Remove the base_path from the request path before processing
+        decoded[base_path.len()..].to_string()
+    } else {
+        decoded.to_string()
+    };
+
+    for c in decoded_path.split('/') {
         path.push(c);
     }
 
@@ -266,11 +284,7 @@ fn construct_url(base_url: &str, no_port_append: bool, interface_port: u16) -> S
         format!("{}{}:{}{}", protocol, domain, interface_port, path)
     };
 
-    if full_address.ends_with('/') {
-        full_address
-    } else {
-        format!("{}/", full_address)
-    }
+    full_address
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,6 +360,11 @@ pub fn serve(
         no_port_append,
         None,
     )?;
+    let base_path = match constructed_base_url.splitn(4, '/').nth(3) {
+        Some(path) => format!("/{}", path),
+        None => "/".to_string(),
+    };
+
     messages::report_elapsed_time(start);
 
     // Stop right there if we can't bind to the address
@@ -416,10 +435,11 @@ pub fn serve(
             rt.block_on(async {
                 let make_service = make_service_fn(move |_| {
                     let static_root = static_root.clone();
+                    let base_path = base_path.clone();
 
                     async {
                         Ok::<_, hyper::Error>(service_fn(move |req| {
-                            handle_request(req, static_root.clone())
+                            handle_request(req, static_root.clone(), base_path.clone())
                         }))
                     }
                 });
@@ -837,25 +857,25 @@ mod tests {
     #[test]
     fn test_construct_url_http_protocol() {
         let result = construct_url("http://example.com", false, 8080);
-        assert_eq!(result, "http://example.com:8080/");
+        assert_eq!(result, "http://example.com:8080");
     }
 
     #[test]
     fn test_construct_url_https_protocol() {
         let result = construct_url("https://example.com", false, 8080);
-        assert_eq!(result, "https://example.com:8080/");
+        assert_eq!(result, "https://example.com:8080");
     }
 
     #[test]
     fn test_construct_url_no_protocol() {
         let result = construct_url("example.com", false, 8080);
-        assert_eq!(result, "http://example.com:8080/");
+        assert_eq!(result, "http://example.com:8080");
     }
 
     #[test]
     fn test_construct_url_no_port_append() {
         let result = construct_url("https://example.com", true, 8080);
-        assert_eq!(result, "https://example.com/");
+        assert_eq!(result, "https://example.com");
     }
 
     #[test]
