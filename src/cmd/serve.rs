@@ -85,7 +85,7 @@ async fn handle_request(
         return Ok(not_found());
     }
 
-    let trimmed_path = &path_str[base_path.len()..];
+    let trimmed_path = &path_str[base_path.len() - 1..];
 
     let original_root = root.clone();
     let mut path = RelativePathBuf::new();
@@ -284,7 +284,11 @@ fn construct_url(base_url: &str, no_port_append: bool, interface_port: u16) -> S
         format!("{}{}:{}{}", protocol, domain, interface_port, path)
     };
 
-    full_address
+    if full_address.ends_with('/') {
+        full_address
+    } else {
+        format!("{}/", full_address)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -857,25 +861,25 @@ mod tests {
     #[test]
     fn test_construct_url_http_protocol() {
         let result = construct_url("http://example.com", false, 8080);
-        assert_eq!(result, "http://example.com:8080");
+        assert_eq!(result, "http://example.com:8080/");
     }
 
     #[test]
     fn test_construct_url_https_protocol() {
         let result = construct_url("https://example.com", false, 8080);
-        assert_eq!(result, "https://example.com:8080");
+        assert_eq!(result, "https://example.com:8080/");
     }
 
     #[test]
     fn test_construct_url_no_protocol() {
         let result = construct_url("example.com", false, 8080);
-        assert_eq!(result, "http://example.com:8080");
+        assert_eq!(result, "http://example.com:8080/");
     }
 
     #[test]
     fn test_construct_url_no_port_append() {
         let result = construct_url("https://example.com", true, 8080);
-        assert_eq!(result, "https://example.com");
+        assert_eq!(result, "https://example.com/");
     }
 
     #[test]
